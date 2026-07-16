@@ -1,0 +1,845 @@
+{
+	"name": "msexports_ExecuteETL",
+	"properties": {
+		"activities": [
+			{
+				"name": "Wait",
+				"description": "Files may not be available immediately after being created.",
+				"type": "Wait",
+				"dependsOn": [],
+				"userProperties": [],
+				"typeProperties": {
+					"waitTimeInSeconds": 60
+				}
+			},
+			{
+				"name": "Read Manifest",
+				"description": "Load the export manifest to determine the scope, dataset, and date range.",
+				"type": "Lookup",
+				"dependsOn": [
+					{
+						"activity": "Wait",
+						"dependencyConditions": [
+							"Completed"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "JsonSource",
+						"storeSettings": {
+							"type": "AzureBlobFSReadSettings",
+							"recursive": true,
+							"enablePartitionDiscovery": false
+						},
+						"formatSettings": {
+							"type": "JsonReadSettings"
+						}
+					},
+					"dataset": {
+						"referenceName": "msexports_manifest",
+						"type": "DatasetReference",
+						"parameters": {
+							"fileName": {
+								"value": "@pipeline().parameters.fileName",
+								"type": "Expression"
+							},
+							"folderPath": {
+								"value": "@pipeline().parameters.folderPath",
+								"type": "Expression"
+							}
+						}
+					}
+				}
+			},
+			{
+				"name": "Set Has No Rows",
+				"description": "Check if there are no blobs or no data rows in the export.",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Read Manifest",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "hasNoRows",
+					"value": {
+						"value": "@or(equals(activity('Read Manifest').output.firstRow.blobCount, null), equals(activity('Read Manifest').output.firstRow.blobCount, 0), and(contains(activity('Read Manifest').output.firstRow, 'dataRowCount'), or(equals(activity('Read Manifest').output.firstRow.dataRowCount, null), equals(activity('Read Manifest').output.firstRow.dataRowCount, 0))))",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Set Export Dataset Type",
+				"description": "Save the dataset type from the export manifest.",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Read Manifest",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "exportDatasetType",
+					"value": {
+						"value": "@activity('Read Manifest').output.firstRow.exportConfig.type",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Set MCA Column",
+				"description": "Determines if the dataset schema has channel-specific columns and saves the column name that only exists in MCA to determine if it is an MCA dataset.",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Set Export Dataset Type",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "mcaColumnToCheck",
+					"value": {
+						"value": "@if(contains(createArray('pricesheet', 'reservationtransactions'), toLower(variables('exportDatasetType'))), 'BillingProfileId', if(equals(toLower(variables('exportDatasetType')), 'reservationrecommendations'), 'Net Savings', null))",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Set Export Dataset Version",
+				"description": "Save the dataset version from the export manifest.",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Read Manifest",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "exportDatasetVersion",
+					"value": {
+						"value": "@activity('Read Manifest').output.firstRow.exportConfig.dataVersion",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Detect Channel",
+				"description": "Determines what channel this export is from. Switch statement handles the different file types if the mcaColumnToCheck variable is set.",
+				"type": "Switch",
+				"dependsOn": [
+					{
+						"activity": "Set Has No Rows",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					},
+					{
+						"activity": "Set MCA Column",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					},
+					{
+						"activity": "Set Export Dataset Version",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"on": {
+						"value": "@if(or(empty(variables('mcaColumnToCheck')), variables('hasNoRows')), 'ignore', last(array(split(activity('Read Manifest').output.firstRow.blobs[0].blobName, '.'))))",
+						"type": "Expression"
+					},
+					"cases": [
+						{
+							"value": "csv",
+							"activities": [
+								{
+									"name": "Check for MCA Column in CSV",
+									"description": "Checks the dataset to determine if the applicable MCA-specific column exists.",
+									"type": "Lookup",
+									"dependsOn": [],
+									"policy": {
+										"timeout": "0.12:00:00",
+										"retry": 0,
+										"retryIntervalInSeconds": 30,
+										"secureOutput": false,
+										"secureInput": false
+									},
+									"userProperties": [],
+									"typeProperties": {
+										"source": {
+											"type": "DelimitedTextSource",
+											"storeSettings": {
+												"type": "AzureBlobFSReadSettings",
+												"recursive": false,
+												"enablePartitionDiscovery": false
+											},
+											"formatSettings": {
+												"type": "DelimitedTextReadSettings"
+											}
+										},
+										"dataset": {
+											"referenceName": "msexports",
+											"type": "DatasetReference",
+											"parameters": {
+												"blobPath": {
+													"value": "@activity('Read Manifest').output.firstRow.blobs[0].blobName",
+													"type": "Expression"
+												}
+											}
+										}
+									}
+								},
+								{
+									"name": "Set Schema File with Channel in CSV",
+									"type": "SetVariable",
+									"dependsOn": [
+										{
+											"activity": "Check for MCA Column in CSV",
+											"dependencyConditions": [
+												"Succeeded"
+											]
+										}
+									],
+									"policy": {
+										"secureOutput": false,
+										"secureInput": false
+									},
+									"userProperties": [],
+									"typeProperties": {
+										"variableName": "schemaFile",
+										"value": {
+											"value": "@toLower(concat(variables('exportDatasetType'), '_', variables('exportDatasetVersion'), if(and(contains(activity('Check for MCA Column in CSV').output, 'firstRow'), contains(activity('Check for MCA Column in CSV').output.firstRow, variables('mcaColumnToCheck'))), '_mca', '_ea'), '.json'))",
+											"type": "Expression"
+										}
+									}
+								}
+							]
+						},
+						{
+							"value": "gz",
+							"activities": [
+								{
+									"name": "Check for MCA Column in Gzip CSV",
+									"description": "Checks the dataset to determine if the applicable MCA-specific column exists.",
+									"type": "Lookup",
+									"dependsOn": [],
+									"policy": {
+										"timeout": "0.12:00:00",
+										"retry": 0,
+										"retryIntervalInSeconds": 30,
+										"secureOutput": false,
+										"secureInput": false
+									},
+									"userProperties": [],
+									"typeProperties": {
+										"source": {
+											"type": "DelimitedTextSource",
+											"storeSettings": {
+												"type": "AzureBlobFSReadSettings",
+												"recursive": false,
+												"enablePartitionDiscovery": false
+											},
+											"formatSettings": {
+												"type": "DelimitedTextReadSettings"
+											}
+										},
+										"dataset": {
+											"referenceName": "msexports_gzip",
+											"type": "DatasetReference",
+											"parameters": {
+												"blobPath": {
+													"value": "@activity('Read Manifest').output.firstRow.blobs[0].blobName",
+													"type": "Expression"
+												}
+											}
+										}
+									}
+								},
+								{
+									"name": "Set Schema File with Channel in Gzip CSV",
+									"type": "SetVariable",
+									"dependsOn": [
+										{
+											"activity": "Check for MCA Column in Gzip CSV",
+											"dependencyConditions": [
+												"Succeeded"
+											]
+										}
+									],
+									"policy": {
+										"secureOutput": false,
+										"secureInput": false
+									},
+									"userProperties": [],
+									"typeProperties": {
+										"variableName": "schemaFile",
+										"value": {
+											"value": "@toLower(concat(variables('exportDatasetType'), '_', variables('exportDatasetVersion'), if(and(contains(activity('Check for MCA Column in Gzip CSV').output, 'firstRow'), contains(activity('Check for MCA Column in Gzip CSV').output.firstRow, variables('mcaColumnToCheck'))), '_mca', '_ea'), '.json'))",
+											"type": "Expression"
+										}
+									}
+								}
+							]
+						},
+						{
+							"value": "parquet",
+							"activities": [
+								{
+									"name": "Check for MCA Column in Parquet",
+									"description": "Checks the dataset to determine if the applicable MCA-specific column exists.",
+									"type": "Lookup",
+									"dependsOn": [],
+									"policy": {
+										"timeout": "0.12:00:00",
+										"retry": 0,
+										"retryIntervalInSeconds": 30,
+										"secureOutput": false,
+										"secureInput": false
+									},
+									"userProperties": [],
+									"typeProperties": {
+										"source": {
+											"type": "ParquetSource",
+											"storeSettings": {
+												"type": "AzureBlobFSReadSettings",
+												"recursive": false,
+												"enablePartitionDiscovery": false
+											},
+											"formatSettings": {
+												"type": "ParquetReadSettings"
+											}
+										},
+										"dataset": {
+											"referenceName": "msexports_parquet",
+											"type": "DatasetReference",
+											"parameters": {
+												"blobPath": {
+													"value": "@activity('Read Manifest').output.firstRow.blobs[0].blobName",
+													"type": "Expression"
+												}
+											}
+										}
+									}
+								},
+								{
+									"name": "Set Schema File with Channel for Parquet",
+									"type": "SetVariable",
+									"dependsOn": [
+										{
+											"activity": "Check for MCA Column in Parquet",
+											"dependencyConditions": [
+												"Succeeded"
+											]
+										}
+									],
+									"policy": {
+										"secureOutput": false,
+										"secureInput": false
+									},
+									"userProperties": [],
+									"typeProperties": {
+										"variableName": "schemaFile",
+										"value": {
+											"value": "@toLower(concat(variables('exportDatasetType'), '_', variables('exportDatasetVersion'), if(and(contains(activity('Check for MCA Column in Parquet').output, 'firstRow'), contains(activity('Check for MCA Column in Parquet').output.firstRow, variables('mcaColumnToCheck'))), '_mca', '_ea'), '.json'))",
+											"type": "Expression"
+										}
+									}
+								}
+							]
+						}
+					],
+					"defaultActivities": [
+						{
+							"name": "Set Schema File",
+							"type": "SetVariable",
+							"dependsOn": [],
+							"policy": {
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"variableName": "schemaFile",
+								"value": {
+									"value": "@toLower(concat(variables('exportDatasetType'), '_', variables('exportDatasetVersion'), '.json'))",
+									"type": "Expression"
+								}
+							}
+						}
+					]
+				}
+			},
+			{
+				"name": "Set Scope",
+				"description": "Save the scope from the export manifest.",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Read Manifest",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "scope",
+					"value": {
+						"value": "@split(toLower(activity('Read Manifest').output.firstRow.exportConfig.resourceId), '/providers/microsoft.costmanagement/exports/')[0]",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Set Date",
+				"description": "Save the exported month from the export manifest.",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Read Manifest",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "date",
+					"value": {
+						"value": "@replace(substring(activity('Read Manifest').output.firstRow.runInfo.startDate, 0, 7), '-', '')",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Failed to Read Manifest",
+				"type": "Fail",
+				"dependsOn": [
+					{
+						"activity": "Set Date",
+						"dependencyConditions": [
+							"Failed"
+						]
+					},
+					{
+						"activity": "Set Export Dataset Type",
+						"dependencyConditions": [
+							"Failed"
+						]
+					},
+					{
+						"activity": "Set Scope",
+						"dependencyConditions": [
+							"Failed"
+						]
+					},
+					{
+						"activity": "Read Manifest",
+						"dependencyConditions": [
+							"Failed"
+						]
+					},
+					{
+						"activity": "Set Export Dataset Version",
+						"dependencyConditions": [
+							"Failed"
+						]
+					},
+					{
+						"activity": "Detect Channel",
+						"dependencyConditions": [
+							"Failed"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"message": {
+						"value": "@concat('Failed to read the manifest file for this export run. Manifest path: ', pipeline().parameters.folderPath)",
+						"type": "Expression"
+					},
+					"errorCode": "ManifestReadFailed"
+				}
+			},
+			{
+				"name": "Check Schema",
+				"description": "Verify that the schema file exists in storage.",
+				"type": "GetMetadata",
+				"dependsOn": [
+					{
+						"activity": "Set Scope",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					},
+					{
+						"activity": "Set Date",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					},
+					{
+						"activity": "Detect Channel",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"dataset": {
+						"referenceName": "config",
+						"type": "DatasetReference",
+						"parameters": {
+							"fileName": {
+								"value": "@variables('schemaFile')",
+								"type": "Expression"
+							},
+							"folderPath": "config/schemas"
+						}
+					},
+					"fieldList": [
+						"exists"
+					],
+					"storeSettings": {
+						"type": "AzureBlobFSReadSettings",
+						"recursive": true,
+						"enablePartitionDiscovery": false
+					},
+					"formatSettings": {
+						"type": "JsonReadSettings"
+					}
+				}
+			},
+			{
+				"name": "Schema Not Found",
+				"type": "Fail",
+				"dependsOn": [
+					{
+						"activity": "Check Schema",
+						"dependencyConditions": [
+							"Failed"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"message": {
+						"value": "@concat('The ', variables('schemaFile'), ' schema mapping file was not found. Please confirm version ', variables('exportDatasetVersion'), ' of the ', variables('exportDatasetType'), ' dataset is supported by this version of FinOps hubs. You may need to upgrade to a newer release. To add support for another dataset, you can create a custom mapping file.')",
+						"type": "Expression"
+					},
+					"errorCode": "SchemaNotFound"
+				}
+			},
+			{
+				"name": "Set Hub Dataset",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Set Export Dataset Type",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "hubDataset",
+					"value": {
+						"value": "@if(equals(toLower(variables('exportDatasetType')), 'focuscost'), 'Costs', if(equals(toLower(variables('exportDatasetType')), 'pricesheet'), 'Prices', if(equals(toLower(variables('exportDatasetType')), 'reservationdetails'), 'CommitmentDiscountUsage', if(equals(toLower(variables('exportDatasetType')), 'reservationrecommendations'), 'Recommendations', if(equals(toLower(variables('exportDatasetType')), 'reservationtransactions'), 'Transactions', if(equals(toLower(variables('exportDatasetType')), 'actualcost'), 'ActualCosts', if(equals(toLower(variables('exportDatasetType')), 'amortizedcost'), 'AmortizedCosts', toLower(variables('exportDatasetType')))))))))",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Set Destination Folder",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Check Schema",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					},
+					{
+						"activity": "Set Hub Dataset",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "destinationFolder",
+					"value": {
+						"value": "@replace(concat(variables('hubDataset'),'/',substring(variables('date'), 0, 4),'/',substring(variables('date'), 4, 2),'/',toLower(variables('scope')), if(equals(variables('hubDataset'), 'Recommendations'), activity('Read Manifest').output.firstRow.exportConfig.exportName, '')),'//','/')",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "For Each Blob",
+				"description": "Loop thru each exported file listed in the manifest.",
+				"type": "ForEach",
+				"dependsOn": [
+					{
+						"activity": "Set Destination Folder",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@if(variables('hasNoRows'), json('[]'), activity('Read Manifest').output.firstRow.blobs)",
+						"type": "Expression"
+					},
+					"isSequential": false,
+					"batchCount": 30,
+					"activities": [
+						{
+							"name": "Execute",
+							"description": "Run the ingestion ETL pipeline.",
+							"type": "ExecutePipeline",
+							"dependsOn": [],
+							"policy": {
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"pipeline": {
+									"referenceName": "msexports_ETL_ingestion",
+									"type": "PipelineReference"
+								},
+								"waitOnCompletion": true,
+								"parameters": {
+									"blobPath": {
+										"value": "@item().blobName",
+										"type": "Expression"
+									},
+									"destinationFolder": {
+										"value": "@variables('destinationFolder')",
+										"type": "Expression"
+									},
+									"destinationFile": {
+										"value": "@last(array(split(replace(replace(item().blobName, '.gz', ''), '.csv', '.parquet'), '/')))",
+										"type": "Expression"
+									},
+									"ingestionId": {
+										"value": "@activity('Read Manifest').output.firstRow.runInfo.runId",
+										"type": "Expression"
+									},
+									"schemaFile": {
+										"value": "@variables('schemaFile')",
+										"type": "Expression"
+									},
+									"exportDatasetType": {
+										"value": "@variables('exportDatasetType')",
+										"type": "Expression"
+									},
+									"exportDatasetVersion": {
+										"value": "@variables('exportDatasetVersion')",
+										"type": "Expression"
+									}
+								}
+							}
+						}
+					]
+				}
+			},
+			{
+				"name": "Copy Manifest",
+				"description": "Copy the manifest to the ingestion container to trigger ADX ingestion. Skipped when there are no data rows to avoid triggering downstream ingestion with no parquet files.",
+				"type": "IfCondition",
+				"dependsOn": [
+					{
+						"activity": "For Each Blob",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"expression": {
+						"value": "@not(variables('hasNoRows'))",
+						"type": "Expression"
+					},
+					"ifTrueActivities": [
+						{
+							"name": "Copy Manifest to Ingestion",
+							"description": "Copy the manifest to the ingestion container to trigger ADX ingestion.",
+							"type": "Copy",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.12:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"source": {
+									"type": "JsonSource",
+									"storeSettings": {
+										"type": "AzureBlobFSReadSettings",
+										"recursive": true,
+										"enablePartitionDiscovery": false
+									},
+									"formatSettings": {
+										"type": "JsonReadSettings"
+									}
+								},
+								"sink": {
+									"type": "JsonSink",
+									"storeSettings": {
+										"type": "AzureBlobFSWriteSettings"
+									},
+									"formatSettings": {
+										"type": "JsonWriteSettings"
+									}
+								},
+								"enableStaging": false
+							},
+							"inputs": [
+								{
+									"referenceName": "msexports_manifest",
+									"type": "DatasetReference",
+									"parameters": {
+										"fileName": "manifest.json",
+										"folderPath": {
+											"value": "@pipeline().parameters.folderPath",
+											"type": "Expression"
+										}
+									}
+								}
+							],
+							"outputs": [
+								{
+									"referenceName": "ingestion_manifest",
+									"type": "DatasetReference",
+									"parameters": {
+										"fileName": "manifest.json",
+										"folderPath": {
+											"value": "@concat('ingestion/', variables('destinationFolder'))",
+											"type": "Expression"
+										}
+									}
+								}
+							]
+						}
+					]
+				}
+			}
+		],
+		"parameters": {
+			"folderPath": {
+				"type": "string"
+			},
+			"fileName": {
+				"type": "string"
+			}
+		},
+		"variables": {
+			"date": {
+				"type": "String"
+			},
+			"destinationFolder": {
+				"type": "String"
+			},
+			"exportDatasetType": {
+				"type": "String"
+			},
+			"exportDatasetVersion": {
+				"type": "String"
+			},
+			"hasNoRows": {
+				"type": "Boolean"
+			},
+			"hubDataset": {
+				"type": "String"
+			},
+			"mcaColumnToCheck": {
+				"type": "String"
+			},
+			"schemaFile": {
+				"type": "String"
+			},
+			"scope": {
+				"type": "String"
+			}
+		},
+		"annotations": [
+			"New export"
+		],
+		"lastPublishTime": "2026-07-10T10:45:25Z"
+	},
+	"type": "Microsoft.DataFactory/factories/pipelines"
+}

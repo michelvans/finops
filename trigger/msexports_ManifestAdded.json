@@ -1,0 +1,29 @@
+{
+	"name": "msexports_ManifestAdded",
+	"properties": {
+		"annotations": [],
+		"runtimeState": "Started",
+		"pipelines": [
+			{
+				"pipelineReference": {
+					"referenceName": "msexports_ExecuteETL",
+					"type": "PipelineReference"
+				},
+				"parameters": {
+					"folderPath": "@triggerBody().folderPath",
+					"fileName": "@triggerBody().fileName"
+				}
+			}
+		],
+		"type": "BlobEventsTrigger",
+		"typeProperties": {
+			"blobPathBeginsWith": "/msexports/blobs/",
+			"blobPathEndsWith": "manifest.json",
+			"ignoreEmptyBlobs": true,
+			"scope": "/subscriptions/184e3b1f-4efc-4c07-b20c-1275a7b7bf09/resourceGroups/rg-finopshub/providers/Microsoft.Storage/storageAccounts/finopshubbtc7zqwrqfptm",
+			"events": [
+				"Microsoft.Storage.BlobCreated"
+			]
+		}
+	}
+}

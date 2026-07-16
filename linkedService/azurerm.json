@@ -1,0 +1,14 @@
+{
+	"name": "azurerm",
+	"type": "Microsoft.DataFactory/factories/linkedservices",
+	"properties": {
+		"annotations": [],
+		"type": "RestService",
+		"typeProperties": {
+			"url": "https://management.azure.com/",
+			"authenticationType": "ManagedServiceIdentity",
+			"enableServerCertificateValidation": true,
+			"aadResourceId": "https://management.azure.com/"
+		}
+	}
+}

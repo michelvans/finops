@@ -1,0 +1,548 @@
+{
+	"name": "queries_ETL_ingestion",
+	"properties": {
+		"activities": [
+			{
+				"name": "Normalize Query Scope",
+				"description": "Replace \"Tenant\" with \"tenants/{tenantId}\" to ensure unique paths across Remote Hubs.",
+				"type": "SetVariable",
+				"dependsOn": [],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "queryScope",
+					"value": {
+						"value": "@if(equals(toLower(pipeline().parameters.queryScope), 'tenant'), 'tenants/c9f39562-ce4c-4d83-a337-00e18e08cf46', if(startsWith(pipeline().parameters.queryScope, '/'), substring(pipeline().parameters.queryScope, 1), pipeline().parameters.queryScope))",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Set Ingestion Path",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Normalize Query Scope",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "ingestionPath",
+					"value": {
+						"value": "@concat(pipeline().parameters.outputDataset, '/', variables('queryScope'), '/', pipeline().parameters.queryType, '/', pipeline().parameters.ingestionId, '__')",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Get Existing Parquet Files",
+				"description": "Get the previously ingested files so we can remove any older data.",
+				"type": "GetMetadata",
+				"dependsOn": [
+					{
+						"activity": "Normalize Query Scope",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"dataset": {
+						"referenceName": "ingestion_files",
+						"type": "DatasetReference",
+						"parameters": {
+							"folderPath": "@concat(pipeline().parameters.outputDataset, '/', variables('queryScope'), '/', pipeline().parameters.queryType)"
+						}
+					},
+					"fieldList": [
+						"exists",
+						"childItems"
+					],
+					"storeSettings": {
+						"type": "AzureBlobFSReadSettings",
+						"recursive": true,
+						"enablePartitionDiscovery": false
+					},
+					"formatSettings": {
+						"type": "ParquetReadSettings"
+					}
+				}
+			},
+			{
+				"name": "Filter Out Current Exports",
+				"description": "Remove existing files from the current export so those files do not get deleted.",
+				"type": "Filter",
+				"dependsOn": [
+					{
+						"activity": "Get Existing Parquet Files",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@if(and(activity('Get Existing Parquet Files').output.exists, contains(activity('Get Existing Parquet Files').output, 'childItems')), activity('Get Existing Parquet Files').output.childItems, json('[]'))",
+						"type": "Expression"
+					},
+					"condition": {
+						"value": "@not(startswith(item().name, concat(pipeline().parameters.ingestionId, '__')))",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Delete Old Files Loop",
+				"description": "Loop thru each of the existing files from previous exports.",
+				"type": "ForEach",
+				"dependsOn": [
+					{
+						"activity": "Filter Out Current Exports",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@activity('Filter Out Current Exports').output.Value",
+						"type": "Expression"
+					},
+					"activities": [
+						{
+							"name": "Delete Old Ingested File",
+							"description": "Delete the previously ingested files from older exports.",
+							"type": "Delete",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.12:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"dataset": {
+									"referenceName": "ingestion",
+									"type": "DatasetReference",
+									"parameters": {
+										"blobPath": {
+											"value": "@concat(pipeline().parameters.outputDataset, '/', variables('queryScope'), '/', pipeline().parameters.queryType, '/', item().name)",
+											"type": "Expression"
+										}
+									}
+								},
+								"enableLogging": false,
+								"storeSettings": {
+									"type": "AzureBlobFSReadSettings",
+									"recursive": false,
+									"enablePartitionDiscovery": false
+								}
+							}
+						}
+					]
+				}
+			},
+			{
+				"name": "Load Schema Mappings",
+				"type": "Lookup",
+				"dependsOn": [],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "JsonSource",
+						"storeSettings": {
+							"type": "AzureBlobFSReadSettings",
+							"recursive": true,
+							"enablePartitionDiscovery": false
+						},
+						"formatSettings": {
+							"type": "JsonReadSettings"
+						}
+					},
+					"dataset": {
+						"referenceName": "config",
+						"type": "DatasetReference",
+						"parameters": {
+							"fileName": {
+								"value": "@pipeline().parameters.schemaFile",
+								"type": "Expression"
+							},
+							"folderPath": "config/schemas"
+						}
+					}
+				}
+			},
+			{
+				"name": "Run Query Engine Pipeline",
+				"description": "Dynamically dispatch to the engine-specific Copy pipeline via ADF REST API.",
+				"type": "WebActivity",
+				"dependsOn": [
+					{
+						"activity": "Set Ingestion Path",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					},
+					{
+						"activity": "Delete Old Files Loop",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					},
+					{
+						"activity": "Load Schema Mappings",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.00:10:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"method": "POST",
+					"headers": {
+						"Content-Type": "application/json"
+					},
+					"url": {
+						"value": "@concat('https://management.azure.com/subscriptions/184e3b1f-4efc-4c07-b20c-1275a7b7bf09/resourceGroups/rg-finopshub/providers/Microsoft.DataFactory/factories/', pipeline().DataFactory, '/pipelines/queries_', pipeline().parameters.queryEngine, '_ExecuteQuery/createRun?api-version=2018-06-01')",
+						"type": "Expression"
+					},
+					"body": {
+						"value": "@json(concat('{\"query\":\"', pipeline().parameters.query, '\",\"querySource\":\"', pipeline().parameters.querySource, '\",\"queryType\":\"', pipeline().parameters.queryType, '\",\"queryProvider\":\"', pipeline().parameters.queryProvider, '\",\"queryVersion\":\"', pipeline().parameters.queryVersion, '\",\"ingestionPath\":\"', concat(variables('ingestionPath'), pipeline().parameters.queryType, '.parquet'), '\",\"translator\":', string(activity('Load Schema Mappings').output.firstRow.translator), '}'))",
+						"type": "Expression"
+					},
+					"authentication": {
+						"type": "MSI",
+						"resource": "https://management.azure.com/"
+					}
+				}
+			},
+			{
+				"name": "Wait For Query Engine Pipeline",
+				"description": "Poll for engine pipeline completion using the runId from createRun.",
+				"type": "Until",
+				"dependsOn": [
+					{
+						"activity": "Run Query Engine Pipeline",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"expression": {
+						"value": "@or(equals(variables('engineRunStatus'), 'Succeeded'), equals(variables('engineRunStatus'), 'Failed'), equals(variables('engineRunStatus'), 'Cancelled'))",
+						"type": "Expression"
+					},
+					"activities": [
+						{
+							"name": "Check Query Engine Pipeline Status",
+							"type": "WebActivity",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.00:05:00",
+								"retry": 2,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"method": "GET",
+								"url": {
+									"value": "@concat('https://management.azure.com/subscriptions/184e3b1f-4efc-4c07-b20c-1275a7b7bf09/resourceGroups/rg-finopshub/providers/Microsoft.DataFactory/factories/', pipeline().DataFactory, '/pipelineruns/', activity('Run Query Engine Pipeline').output.runId, '?api-version=2018-06-01')",
+									"type": "Expression"
+								},
+								"authentication": {
+									"type": "MSI",
+									"resource": "https://management.azure.com/"
+								}
+							}
+						},
+						{
+							"name": "Set Engine Run Status",
+							"type": "SetVariable",
+							"dependsOn": [
+								{
+									"activity": "Check Query Engine Pipeline Status",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"policy": {
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"variableName": "engineRunStatus",
+								"value": {
+									"value": "@activity('Check Query Engine Pipeline Status').output.status",
+									"type": "Expression"
+								}
+							}
+						},
+						{
+							"name": "Wait Before Retry",
+							"type": "Wait",
+							"dependsOn": [
+								{
+									"activity": "Set Engine Run Status",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"userProperties": [],
+							"typeProperties": {
+								"waitTimeInSeconds": 15
+							}
+						}
+					],
+					"timeout": "0.00:30:00"
+				}
+			},
+			{
+				"name": "Verify Query Engine Pipeline Succeeded",
+				"description": "Fail the pipeline if the query engine run did not succeed.",
+				"type": "IfCondition",
+				"dependsOn": [
+					{
+						"activity": "Wait For Query Engine Pipeline",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"expression": {
+						"value": "@not(equals(variables('engineRunStatus'), 'Succeeded'))",
+						"type": "Expression"
+					},
+					"ifTrueActivities": [
+						{
+							"name": "Query Engine Pipeline Failed",
+							"type": "Fail",
+							"dependsOn": [],
+							"userProperties": [],
+							"typeProperties": {
+								"message": {
+									"value": "@concat('Query engine pipeline finished with status: ', variables('engineRunStatus'))",
+									"type": "Expression"
+								},
+								"errorCode": "QueryEnginePipelineFailed"
+							}
+						}
+					]
+				}
+			},
+			{
+				"name": "Check If Data Was Written",
+				"description": "Check if the query engine actually wrote output files before creating a manifest.",
+				"type": "GetMetadata",
+				"dependsOn": [
+					{
+						"activity": "Verify Query Engine Pipeline Succeeded",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"dataset": {
+						"referenceName": "ingestion_files",
+						"type": "DatasetReference",
+						"parameters": {
+							"folderPath": "@concat(pipeline().parameters.outputDataset, '/', variables('queryScope'), '/', pipeline().parameters.queryType)"
+						}
+					},
+					"fieldList": [
+						"exists"
+					],
+					"storeSettings": {
+						"type": "AzureBlobFSReadSettings",
+						"recursive": true,
+						"enablePartitionDiscovery": false
+					},
+					"formatSettings": {
+						"type": "ParquetReadSettings"
+					}
+				}
+			},
+			{
+				"name": "Create Manifest If Data Exists",
+				"description": "Only create a manifest file when query results were written, to avoid triggering ADX ingestion on empty folders.",
+				"type": "IfCondition",
+				"dependsOn": [
+					{
+						"activity": "Check If Data Was Written",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"expression": {
+						"value": "@activity('Check If Data Was Written').output.exists",
+						"type": "Expression"
+					},
+					"ifTrueActivities": [
+						{
+							"name": "Create Manifest",
+							"description": "Copy the settings file as manifest.json to the ingestion folder to trigger ADX ingestion.",
+							"type": "Copy",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.12:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"source": {
+									"type": "JsonSource",
+									"storeSettings": {
+										"type": "AzureBlobFSReadSettings",
+										"recursive": true,
+										"enablePartitionDiscovery": false
+									},
+									"formatSettings": {
+										"type": "JsonReadSettings"
+									}
+								},
+								"sink": {
+									"type": "JsonSink",
+									"storeSettings": {
+										"type": "AzureBlobFSWriteSettings"
+									},
+									"formatSettings": {
+										"type": "JsonWriteSettings"
+									}
+								},
+								"enableStaging": false
+							},
+							"inputs": [
+								{
+									"referenceName": "config",
+									"type": "DatasetReference",
+									"parameters": {
+										"fileName": "settings.json",
+										"folderPath": "config"
+									}
+								}
+							],
+							"outputs": [
+								{
+									"referenceName": "ingestion_manifest",
+									"type": "DatasetReference",
+									"parameters": {
+										"fileName": "manifest.json",
+										"folderPath": {
+											"value": "@concat('ingestion/', pipeline().parameters.outputDataset, '/', variables('queryScope'), '/', pipeline().parameters.queryType)",
+											"type": "Expression"
+										}
+									}
+								}
+							]
+						}
+					]
+				}
+			}
+		],
+		"parameters": {
+			"ingestionId": {
+				"type": "String"
+			},
+			"queryEngine": {
+				"type": "String"
+			},
+			"outputDataset": {
+				"type": "String"
+			},
+			"schemaFile": {
+				"type": "String"
+			},
+			"queryScope": {
+				"type": "String"
+			},
+			"query": {
+				"type": "String"
+			},
+			"queryVersion": {
+				"type": "String"
+			},
+			"querySource": {
+				"type": "String"
+			},
+			"queryProvider": {
+				"type": "String"
+			},
+			"queryType": {
+				"type": "String"
+			}
+		},
+		"variables": {
+			"queryScope": {
+				"type": "String"
+			},
+			"ingestionPath": {
+				"type": "String"
+			},
+			"engineRunStatus": {
+				"type": "String"
+			}
+		},
+		"annotations": [],
+		"lastPublishTime": "2026-07-10T10:43:42Z"
+	},
+	"type": "Microsoft.DataFactory/factories/pipelines"
+}

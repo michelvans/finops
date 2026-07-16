@@ -1,0 +1,156 @@
+{
+	"name": "queries_ExecuteETL",
+	"properties": {
+		"activities": [
+			{
+				"name": "Load Queries",
+				"type": "Lookup",
+				"dependsOn": [],
+				"policy": {
+					"timeout": "0.00:10:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "JsonSource",
+						"storeSettings": {
+							"type": "AzureBlobFSReadSettings",
+							"recursive": true,
+							"wildcardFileName": "*.json",
+							"enablePartitionDiscovery": false
+						},
+						"formatSettings": {
+							"type": "JsonReadSettings"
+						}
+					},
+					"dataset": {
+						"referenceName": "config",
+						"type": "DatasetReference",
+						"parameters": {
+							"fileName": "*.json",
+							"folderPath": "config/queries"
+						}
+					},
+					"firstRowOnly": false
+				}
+			},
+			{
+				"name": "Set Ingestion Id",
+				"type": "SetVariable",
+				"dependsOn": [],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "ingestionId",
+					"value": {
+						"value": "@concat(utcNow('yyyyMMdd-HHmmss'), '_', substring(guid(), 0, 8))",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Loop Thru Queries",
+				"type": "ForEach",
+				"dependsOn": [
+					{
+						"activity": "Load Queries",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					},
+					{
+						"activity": "Set Ingestion Id",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@activity('Load Queries').output.value",
+						"type": "Expression"
+					},
+					"isSequential": false,
+					"batchCount": 2,
+					"activities": [
+						{
+							"name": "Execute File Queries",
+							"description": "Execute the queries declared in the queries file.",
+							"type": "ExecutePipeline",
+							"dependsOn": [],
+							"policy": {
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"pipeline": {
+									"referenceName": "queries_ETL_ingestion",
+									"type": "PipelineReference"
+								},
+								"waitOnCompletion": true,
+								"parameters": {
+									"ingestionId": {
+										"value": "@variables('ingestionId')",
+										"type": "Expression"
+									},
+									"queryEngine": {
+										"value": "@item().queryEngine",
+										"type": "Expression"
+									},
+									"outputDataset": {
+										"value": "@item().dataset",
+										"type": "Expression"
+									},
+									"schemaFile": {
+										"value": "@concat(toLower(item().dataset), '_', item().version, '.json')",
+										"type": "Expression"
+									},
+									"queryScope": {
+										"value": "@item().scope",
+										"type": "Expression"
+									},
+									"query": {
+										"value": "@item().query",
+										"type": "Expression"
+									},
+									"queryVersion": {
+										"value": "@item().version",
+										"type": "Expression"
+									},
+									"querySource": {
+										"value": "@item().source",
+										"type": "Expression"
+									},
+									"queryProvider": {
+										"value": "@item().provider",
+										"type": "Expression"
+									},
+									"queryType": {
+										"value": "@item().type",
+										"type": "Expression"
+									}
+								}
+							}
+						}
+					]
+				}
+			}
+		],
+		"variables": {
+			"ingestionId": {
+				"type": "String"
+			}
+		},
+		"annotations": [],
+		"lastPublishTime": "2026-07-10T10:43:42Z"
+	},
+	"type": "Microsoft.DataFactory/factories/pipelines"
+}
